@@ -1,29 +1,56 @@
 <!doctype html>
 <html lang="ko">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>AI Mood Music Recommender</title>
-    <link rel="stylesheet" href="/static/style.css" />
-  </head>
-  <body>
-    <div class="container">
-      <header>
-        <h1>AI Mood Music Recommender</h1>
-        <p>현재 기분이나 상황을 말하면 어울리는 음악을 추천해드립니다.</p>
-      </header>
-
-      <section class="input-section">
-        <label for="prompt">상황 / 분위기 설명</label>
-        <textarea id="prompt" placeholder="예) 밤새 과제해야 해서 집중되는 로파이…"></textarea>
-        <button id="recommend-btn">추천 받기</button>
-      </section>
-
-      <section class="results-section">
-        <h2>추천 결과</h2>
-        <ul id="results-list"></ul>
-      </section>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>MoodSync · 상황 인식 음악 추천</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="site-header">
+    <div class="container row between center">
+      <div class="brand">
+        <div class="logo">🎵</div>
+        <div>
+          <h1 class="brand-title">MoodSync</h1>
+          <p class="brand-sub">AI 기반 상황 인식 음악 추천</p>
+        </div>
+      </div>
+      <nav class="nav">
+        <a class="nav-link" href="https://open.spotify.com/" target="_blank">Spotify</a>
+        <a class="nav-link" href="https://music.youtube.com/" target="_blank">YouTube Music</a>
+        <a class="nav-link" href="https://www.youtube.com/" target="_blank">YouTube</a>
+      </nav>
     </div>
-    <script src="/static/app.js"></script>
-  </body>
+  </header>
+
+  <main class="container grid-2 gap-24">
+    <section class="card">
+      <h2 class="section-title">상황 / 분위기 설명</h2>
+      <p class="muted">예: “달리기하는데 신나는 노래” “밤샘 코딩 집중용” “롤 지고 화남, 에너지 회복”</p>
+      <textarea id="prompt" class="input" rows="5" placeholder="지금 상황/분위기/장르/언어 등을 적어주세요."></textarea>
+      <div class="row gap-8 mt-12">
+        <button id="btn-voice" class="btn btn-primary">🎤 음성 입력</button>
+        <button id="btn-stop" class="btn">⏹️ 멈추기</button>
+        <div class="flex-1"></div>
+        <button id="btn-recommend" class="btn btn-cta">추천 받기</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="row between center">
+        <h2 class="section-title">추천 결과</h2>
+      </div>
+      <div id="results" class="results">
+        <div class="empty">아직 추천을 받지 않았습니다.</div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container muted">Tip: 제목이나 아티스트를 클릭하면 바로 검색 링크로 이동합니다.</div>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
 </html>

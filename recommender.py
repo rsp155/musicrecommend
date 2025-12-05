@@ -1,197 +1,146 @@
-# recommender.py  — Ollama 연동 + 점수 기반 추천 (완전체)
-
-from __future__ import annotations
-
+# recommender.py
 import os
-import re
 import json
-from typing import Dict, List
-
+import re
 import requests
-from sqlalchemy.orm import Session
+from models import Session, Song  # 기존 models.py 그대로 사용
 
-from models import Song
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct")
+LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "30"))
 
-# ===== LLM 설정 =====
-# 환경변수로 바꾸고 싶으면 터미널에서:
-#   setx OLLAMA_URL "http://localhost:11434"
-#   setx OLLAMA_MODEL "qwen2.5:3b-instruct"
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:3b-instruct")  # 또는 "llama3.2:3b-instruct"
+SYSTEM_PROMPT = (
+    "너는 음악 추천을 위한 태그 추출기야. 사용자의 한국어/영어 설명에서 "
+    "다음 5가지를 JSON으로만 출력하라.\n"
+    "keys = ['genre','mood','energy','tempo','language']\n"
+    "- genre: 대략적 장르 (ballad, pop, jazz, indie, r&b, hiphop 등)\n"
+    "- mood: 감정/무드 (sad, calm, happy, energetic 등 1~2단어)\n"
+    "- energy: low|medium|high 중 하나\n"
+    "- tempo: slow|mid|fast 중 하나\n"
+    "- language: ko|en|ja 등 ISO 2글자 (모르면 빈 문자열)\n"
+    "설명에 없으면 빈 문자열로 두되, 추측 가능한 범위에서 간결히 채워라.\n"
+    "답변은 JSON 한 줄만. 추가 문장 금지."
+)
 
-
-# ---------- 규칙기반 폴백 ----------
-def _rules_fallback(user_text: str) -> dict:
-    t = (user_text or "").lower()
-
-    if any(k in t for k in ["공부", "집중", "과제", "study", "focus"]):
-        return {
-            "mood": "focus",
-            "genre": ["lofi", "chill"],
-            "situation": ["study"],
-            "energy": "low-mid",
-            "tempo": "medium",
-        }
-    if any(k in t for k in ["운동", "헬스", "workout", "달리기", "러닝"]):
-        return {
-            "mood": "motivated",
-            "genre": ["edm", "hip-hop"],
-            "situation": ["workout"],
-            "energy": "high",
-            "tempo": "fast",
-        }
-    if any(k in t for k in ["슬픔", "비", "rain", "sad", "우울"]):
-        return {
-            "mood": "melancholy",
-            "genre": ["ballad", "indie"],
-            "situation": ["rainy-day"],
-            "energy": "low",
-            "tempo": "slow",
-        }
-    if any(k in t for k in ["드라이브", "drive", "야간", "밤"]):
-        return {
-            "mood": "chill",
-            "genre": ["synthwave", "lofi"],
-            "situation": ["drive", "night"],
-            "energy": "mid",
-            "tempo": "medium",
-        }
-
-    # 기본값
-    return {
-        "mood": "focus",
-        "genre": ["lofi", "chill"],
-        "situation": ["study"],
-        "energy": "low-mid",
-        "tempo": "medium",
-    }
-
-
-# ---------- 유틸 ----------
 def _extract_json(text: str) -> dict:
-    """응답에 설명이 섞여도 JSON 객체만 추출."""
-    if not text:
-        return {}
-    m = re.search(r"\{.*\}", text, flags=re.S)
+    # 코드블록 또는 본문에서 JSON만 깔끔히 추출
+    m = re.search(r"\{.*\}", text, re.S)
     if not m:
         return {}
-    return json.loads(m.group(0))
+    raw = m.group(0)
+    try:
+        obj = json.loads(raw)
+        if isinstance(obj, dict):
+            return obj
+    except Exception:
+        pass
+    return {}
 
-
-def _tokenize(value: str | None) -> List[str]:
-    if not value:
-        return []
-    return [x.strip().lower() for x in value.replace("/", ",").split(",") if x.strip()]
-
-
-# ---------- LLM 호출 ----------
-def call_llm(user_text: str) -> dict:
-    """
-    Ollama Chat API로 태그를 추출.
-    실패 시 규칙기반(_rules_fallback)으로 폴백.
-    """
-    prompt = f"""
-다음 사용자의 문장을 보고, 분위기/장르/상황 태그를 JSON으로만 출력하세요.
-반드시 아래 JSON 형식만 출력하고, 설명은 포함하지 마세요.
-
-{{
-  "mood": "<한 단어>",
-  "genre": ["<장르>", ...],
-  "situation": ["<상황>", ...],
-  "energy": "<low|low-mid|mid|high>",
-  "tempo": "<slow|medium|fast>"
-}}
-
-문장: {user_text}
-"""
+def call_llm_tags(content: str) -> dict:
+    # 내용이 비어도 방어
+    if not content:
+        return {}
 
     try:
-        r = requests.post(
-            f"{OLLAMA_URL}/api/chat",
-            json={
-                "model": OLLAMA_MODEL,
-                "messages": [{"role": "user", "content": prompt}],
-                "stream": False,
-            },
-            timeout=30,
-        )
-        r.raise_for_status()
-        content = r.json().get("message", {}).get("content", "")
-        data = _extract_json(content)
-
-        # 최소 필드 체크
-        if not isinstance(data, dict) or "mood" not in data:
-            return _rules_fallback(user_text)
-
-        # 타입 보정
-        if not isinstance(data.get("genre"), list):
-            data["genre"] = list(filter(None, [data.get("genre")])) if data.get("genre") else []
-        if not isinstance(data.get("situation"), list):
-            data["situation"] = list(filter(None, [data.get("situation")])) if data.get("situation") else []
-
-        return data
-
-    except Exception as e:
-        print("[LLM ERROR]", repr(e))
-        return _rules_fallback(user_text)
-
-
-# ---------- 스코어링 & 추천 ----------
-def _score_song(song: Song, tags: Dict) -> int:
-    score = 0
-
-    # mood 정확히 일치
-    if tags.get("mood") and song.mood and song.mood.lower() == str(tags["mood"]).lower():
-        score += 3
-
-    # genre/situation 교집합
-    wanted_genres = set(g.lower() for g in tags.get("genre", []) if g)
-    wanted_situ = set(s.lower() for s in tags.get("situation", []) if s)
-
-    song_genres = set(_tokenize(song.genre))
-    song_situ = set(_tokenize(song.situation))
-
-    score += len(wanted_genres & song_genres) * 2
-    score += len(wanted_situ & song_situ) * 2
-
-    # energy 대략 매칭
-    if tags.get("energy") and song.energy and str(tags["energy"]).split("-")[0] in song.energy:
-        score += 1
-
-    # tempo(선택): fast/slow/medium 힌트
-    if tags.get("tempo") and song.tempo:
-        t = str(tags["tempo"]).lower()
-        if (t == "fast" and song.tempo >= 120) or (t == "slow" and song.tempo <= 85) or (
-            t == "medium" and 86 <= song.tempo <= 119
-        ):
-            score += 1
-
-    return score
-
-
-def generate_reason(song: Song, tags: Dict) -> str:
-    mood = tags.get("mood") or song.mood or ""
-    genre = ", ".join(tags.get("genre", [])) or song.genre or ""
-    situation = ", ".join(tags.get("situation", [])) or song.situation or ""
-    return f"{mood} 무드 / {genre} 느낌 / {situation} 상황에 잘 맞아서 추천해요."
-
-
-def recommend_songs(db: Session, tags: Dict, limit: int = 5) -> list[dict]:
-    songs: List[Song] = db.query(Song).all()
-
-    ranked: List[tuple[int, Song]] = []
-    for s in songs:
-        sc = _score_song(s, tags)
-        if sc > 0:
-            ranked.append((sc, s))
-
-    ranked.sort(key=lambda x: x[0], reverse=True)
-    top = [s for _, s in ranked[:limit]]
-
-    return [
-        {
-            **s.to_dict(),
-            "reason": generate_reason(s, tags),
+        payload = {
+            "model": OLLAMA_MODEL,
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": content}
+            ],
+            "stream": False
         }
-        for s in top
-    ]
+        url = f"{OLLAMA_URL}/api/chat"
+        r = requests.post(url, json=payload, timeout=LLM_TIMEOUT)
+        r.raise_for_status()
+        data = r.json()
+        # Ollama chat 응답에서 message.content에 본문 있음
+        msg = (data.get("message") or {}).get("content") or ""
+        obj = _extract_json(msg)
+    except Exception as e:
+        print(f"[LLM] 호출/파싱 오류: {e}")
+        obj = {}
+
+    # 표준화
+    return normalize_tags(obj)
+
+def normalize_tags(tags: dict) -> dict:
+    # 소문자/공백정리 + 허용 값 라벨링
+    g = (tags.get("genre") or "").strip().lower()
+    m = (tags.get("mood") or "").strip().lower()
+    e = (tags.get("energy") or "").strip().lower()
+    t = (tags.get("tempo") or "").strip().lower()
+    l = (tags.get("language") or "").strip().lower()
+
+    # energy/tempo 정규화
+    def snap(val, choices):
+        return val if val in choices else ""
+    e = snap(e, ["low", "medium", "mid", "high"]).replace("mid", "medium")
+    t = snap(t, ["slow", "mid", "fast"])
+
+    # 너무 장문이면 1~2단어로 축약
+    m = re.sub(r"[^a-z ]", " ", m).strip()
+    m = " ".join(m.split()[:2])
+
+    return {
+        "genre": g,
+        "mood": m,
+        "energy": e,
+        "tempo": t,
+        "language": l
+    }
+
+def recommend_songs(tags: dict, topk: int = 3) -> list:
+    """
+    단순 스코어 규칙:
+      - 각 필드 일치 시 +1, mood 부분포함시 +0.5
+      - 우선 genre, mood, energy, tempo, language 순으로 가중
+    """
+    if not isinstance(tags, dict):
+        tags = {}
+
+    g = (tags.get("genre") or "").lower()
+    m = (tags.get("mood") or "").lower()
+    e = (tags.get("energy") or "").lower()
+    t = (tags.get("tempo") or "").lower()
+    l = (tags.get("language") or "").lower()
+
+    results = []
+    with Session() as s:
+        rows = s.query(Song).all()
+        for r in rows:
+            score = 0.0
+            # 일치 점수
+            if g and (r.genre or "").lower() == g:
+                score += 1.2
+            if m:
+                rm = (r.mood or "").lower()
+                if rm == m:
+                    score += 1.1
+                elif m in rm or rm in m:
+                    score += 0.6
+            if e and (r.energy or "").lower() == e:
+                score += 1.0
+            if t and (r.tempo or "").lower() == t:
+                score += 0.8
+            if l and (r.language or "").lower() == l:
+                score += 0.5
+
+            if score > 0:
+                results.append((
+                    score,
+                    {
+                        "title": r.title,
+                        "artist": r.artist,
+                        "genre": r.genre or "",
+                        "mood": r.mood or "",
+                        "energy": r.energy or "",
+                        "tempo": r.tempo or "",
+                        "language": r.language or "",
+                        # 필요 시 링크도 채워 넣기
+                        "links": getattr(r, "links", None) or {}
+                    }
+                ))
+
+    results.sort(key=lambda x: x[0], reverse=True)
+    return [item for _, item in results[:max(1, topk)]]
